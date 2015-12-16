@@ -16,3 +16,4 @@ Other goals:
     * Try to find how much load the server can take before tipping over
     * Measure lower load over a longer period of time to find outliers
     * more?
+  * Proxy support would be great for recording traffic from a browser, using nginx and log tailing probably
