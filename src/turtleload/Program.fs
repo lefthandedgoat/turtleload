@@ -56,15 +56,26 @@ let html jobId =
 //actor stuff
 type actor<'t> = MailboxProcessor<'t>
 
-type Command =
-  | Say of string
+type Verb =
+  | Get
+  | Post
+  | Put
+  | Delete
 
-type Worker =
-  | Printer of int
-  | Yeller of int
+type Header =
+  | ContentType of string
+
+type Request =
+  {
+    uri : string
+    verb : Verb
+    headers : Header list
+  }
+
+type Command =
+  | Process of Request
 
 type Manager =
-  | Add of Worker
   | Do of Command
   | Start
   | Stop
@@ -78,36 +89,31 @@ type Status =
   | Running
   | Stopped
 
+let doit (request : Request) =
+  ()
+
 let newManager () : actor<Manager> =
   actor.Start(fun inbox ->
-    let rec loop status workers =
+    let rec loop status =
       async {
         let! msg = inbox.Receive ()
         match msg with
-        | Add worker ->
-          let workers = workers @ [worker]
-          return! loop status workers
         | Do command ->
           match status with
           | Stopped ->
             printfn "Can't do work when the job is stopped"
-            return! loop status workers
+            return! loop status
           | Running ->
-            let worker = workers |> List.head
-            let others = workers |> List.tail
             match command with
-            | Say(message) ->
-              match worker with
-              | Printer(id) -> printfn "I am printer %i, my message is %s" id message
-              | Yeller(id) -> printfn "I AM YELLER %i, my message is %s" id message
-            let workers = others @ [worker]
-            return! loop status workers
+            | Process req -> doit req
+            //process command here
+            return! loop status
         | Manager.Stop ->
-          return! loop Stopped workers
+          return! loop Stopped
         | Manager.Start ->
-          return! loop Running workers
+          return! loop Running
       }
-    loop Stopped []
+    loop Stopped
   )
 
 let newJobManager () : actor<JobManager> =
@@ -116,17 +122,21 @@ let newJobManager () : actor<JobManager> =
       async {
         let! msg = inbox.Receive ()
         match msg with
-        | Send(jobId, message) ->
+        | Send(jobId, _) ->
+          let req =
+            {
+              uri = "http://localhost:8083"
+              verb = Verb.Get
+              headers = []
+            }
           let maybeManager = managers |> List.tryFind (fun (jobId', _) -> jobId' = jobId)
           match maybeManager with
           | Some(_, manager) ->
-            manager.Post(Do(Say message))
+            manager.Post(Do(Process req))
             return! loop managers
           | None ->
             let manager = newManager()
-            let worker = Printer 1
-            manager.Post(Add(worker))
-            manager.Post(Do(Say message))
+            manager.Post(Do(Process req))
             let managers = (jobId, manager) :: managers
             return! loop managers
         | Stop jobId ->
