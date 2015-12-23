@@ -8,5 +8,6 @@ nuget SourceLink.Fake
 nuget Suave
 nuget Suave.Experimental
 nuget FSharp.Core
+nuget Http.fs-prerelease
 
 github fsharp/FAKE modules/Octokit/Octokit.fsx
