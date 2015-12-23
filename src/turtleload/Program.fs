@@ -7,6 +7,7 @@ open Suave.Http
 open Suave.Http.Applicatives
 open Suave.Model.Binding
 open Suave.Http.ServerErrors
+open HttpFs.Client
 
 //helpers
 let guid guid = System.Guid.Parse(guid)
@@ -56,24 +57,8 @@ let html jobId =
 //actor stuff
 type actor<'t> = MailboxProcessor<'t>
 
-type Verb =
-  | Get
-  | Post
-  | Put
-  | Delete
-
-type Header =
-  | ContentType of string
-
-type Request =
-  {
-    uri : string
-    verb : Verb
-    headers : Header list
-  }
-
 type Command =
-  | Process of Request
+  | Process of string
 
 type Manager =
   | Do of Command
@@ -89,8 +74,16 @@ type Status =
   | Running
   | Stopped
 
-let doit (request : Request) =
-  ()
+let doit uri =
+  printfn "doing it"
+  let stopWatch = System.Diagnostics.Stopwatch.StartNew()
+  let request = createRequest Get <| Uri(uri)
+  let response = getResponse request |> Async.RunSynchronously
+  let body = Response.readBodyAsString response |> Async.RunSynchronously
+  let responseTime = stopWatch.Elapsed.TotalMilliseconds
+  printfn "%A" responseTime
+  printfn "%A" response
+  printfn "%A" body
 
 let newManager () : actor<Manager> =
   actor.Start(fun inbox ->
@@ -105,8 +98,7 @@ let newManager () : actor<Manager> =
             return! loop status
           | Running ->
             match command with
-            | Process req -> doit req
-            //process command here
+            | Process uri -> doit uri
             return! loop status
         | Manager.Stop ->
           return! loop Stopped
@@ -121,22 +113,17 @@ let newJobManager () : actor<JobManager> =
     let rec loop (managers : (Guid * actor<Manager>) list) =
       async {
         let! msg = inbox.Receive ()
+        let uri = "http://www.example.com"
         match msg with
         | Send(jobId, _) ->
-          let req =
-            {
-              uri = "http://localhost:8083"
-              verb = Verb.Get
-              headers = []
-            }
           let maybeManager = managers |> List.tryFind (fun (jobId', _) -> jobId' = jobId)
           match maybeManager with
           | Some(_, manager) ->
-            manager.Post(Do(Process req))
+            manager.Post(Do(Process uri))
             return! loop managers
           | None ->
             let manager = newManager()
-            manager.Post(Do(Process req))
+            manager.Post(Do(Process uri))
             let managers = (jobId, manager) :: managers
             return! loop managers
         | Stop jobId ->
