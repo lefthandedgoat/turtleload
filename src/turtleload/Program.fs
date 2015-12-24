@@ -23,13 +23,9 @@ let logAndShow500 error =
 let bindToForm form handler =
   bindReq (bindForm form) handler logAndShow500
 
-type Send = { JobId : string; Message : string; }
-type Stop = { JobId : string; }
-type Start = { JobId : string; }
+type Send = { JobId : string; NumberOfRequests : string; }
 
 let send : Form<Send> = Form ([],[])
-let stop : Form<Stop> = Form ([],[])
-let start : Form<Start> = Form ([],[])
 
 let html jobId =
  sprintf """
@@ -37,25 +33,15 @@ let html jobId =
 <body>
 
 <form method="POST" action="/send">
-  Message:
-  <input type="text" name="Message">
+  Number of requests:
+  <input type="text" name="NumberOfRequests">
   <input type="hidden" name="JobId" value="%s">
   <input type="submit" value="Send">
 </form>
 
-<form method="POST" action="/start">
-  <input type="hidden" name="JobId" value="%s">
-  <input type="submit" value="Start">
-</form>
-
-<form method="POST" action="/stop">
-  <input type="hidden" name="JobId" value="%s">
-  <input type="submit" value="Stop">
-</form>
-
 </body>
 </html>
-  """ jobId jobId jobId
+  """ jobId
 
 //actor stuff
 type actor<'t> = MailboxProcessor<'t>
@@ -69,17 +55,9 @@ type Worker =
 
 type Manager =
   | Do of int * Command
-  | Start
-  | Stop
 
 type MetaManager =
-  | Send of jobId : Guid * message : string
-  | Stop of jobId : Guid
-  | Start of jobId : Guid
-
-type Status =
-  | Running
-  | Stopped
+  | Send of jobId : Guid * numberOfRequests : int
 
 let doit uri =
   let stopWatch = System.Diagnostics.Stopwatch.StartNew()
@@ -105,25 +83,16 @@ let newWorker manager : actor<Worker> =
 
 let newManager () : actor<Manager> =
   actor.Start(fun self ->
-    let rec loop status =
+    let rec loop () =
       async {
         let! msg = self.Receive ()
         match msg with
         | Manager.Do (count, command) ->
-          match status with
-          | Stopped ->
-            printfn "Can't do work when the job is stopped"
-            return! loop status
-          | Running ->
-            let workers = [ 1 .. count ] |> List.map (fun _ -> newWorker self)
-            workers |> List.iter (fun worker -> worker.Post(Worker.Do(command)); worker.Post(Retire))
-            return! loop status
-        | Manager.Stop ->
-          return! loop Stopped
-        | Manager.Start ->
-          return! loop Running
+          let workers = [ 1 .. count ] |> List.map (fun _ -> newWorker self)
+          workers |> List.iter (fun worker -> worker.Post(Worker.Do(command)); worker.Post(Retire))
+          return! loop ()
       }
-    loop Stopped
+    loop ()
   )
 
 let getManager managers jobId =
@@ -144,16 +113,7 @@ let newMetaManager () : actor<MetaManager> =
         match msg with
         | Send(jobId, count) ->
           let manager, managers = getManager managers jobId
-          let count = int count
           manager.Post(Do(count, Process uri))
-          return! loop managers
-        | Stop jobId ->
-          let manager, managers = getManager managers jobId
-          manager.Post(Manager.Stop)
-          return! loop managers
-        | Start jobId ->
-          let manager, managers = getManager managers jobId
-          manager.Post(Manager.Start)
           return! loop managers
       }
     loop []
@@ -165,9 +125,10 @@ let webPart =
   choose
     [
       path "/" >>= choose [ GET >>= (OK <| html (System.Guid.NewGuid().ToString())) ]
-      path "/send" >>= choose [ POST >>= bindToForm send (fun msg -> metaManager.Post(Send(guid msg.JobId, msg.Message)); (OK <| html msg.JobId)) ]
-      path "/stop" >>= choose [ POST >>= bindToForm stop (fun msg -> metaManager.Post(Stop(guid msg.JobId)); (OK <| html msg.JobId)) ]
-      path "/start" >>= choose [ POST >>= bindToForm start (fun msg -> metaManager.Post(Start(guid msg.JobId)); (OK <| html msg.JobId)) ]
+      path "/send" >>= choose [ POST >>= bindToForm send
+                                           (fun msg ->
+                                              metaManager.Post(Send(guid msg.JobId, int msg.NumberOfRequests))
+                                              OK <| html msg.JobId) ]
     ]
 
 startWebServer defaultConfig webPart
