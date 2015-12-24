@@ -75,10 +75,9 @@ type Status =
   | Stopped
 
 let doit uri =
-  printfn "doing it"
   let stopWatch = System.Diagnostics.Stopwatch.StartNew()
   let request = createRequest Get <| Uri(uri)
-  let response = getResponse request |> Async.RunSynchronously
+  use response = getResponse request |> Async.RunSynchronously
   let body = Response.readBodyAsString response |> Async.RunSynchronously
   let responseTime = stopWatch.Elapsed.TotalMilliseconds
   printfn "%A" responseTime
@@ -113,7 +112,7 @@ let newJobManager () : actor<JobManager> =
     let rec loop (managers : (Guid * actor<Manager>) list) =
       async {
         let! msg = inbox.Receive ()
-        let uri = "http://www.example.com"
+        let uri = "http://localhost:8083"
         match msg with
         | Send(jobId, _) ->
           let maybeManager = managers |> List.tryFind (fun (jobId', _) -> jobId' = jobId)
