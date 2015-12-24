@@ -36,17 +36,17 @@ let html jobId =
 <form method="POST" action="/send">
   Message:
   <input type="text" name="Message">
-  <input type="hidden" name="JobId" value="%A">
+  <input type="hidden" name="JobId" value="%s">
   <input type="submit" value="Send">
 </form>
 
 <form method="POST" action="/start">
-  <input type="hidden" name="JobId" value="%A">
+  <input type="hidden" name="JobId" value="%s">
   <input type="submit" value="Start">
 </form>
 
 <form method="POST" action="/stop">
-  <input type="hidden" name="JobId" value="%A">
+  <input type="hidden" name="JobId" value="%s">
   <input type="submit" value="Stop">
 </form>
 
@@ -81,8 +81,6 @@ let doit uri =
   let body = Response.readBodyAsString response |> Async.RunSynchronously
   let responseTime = stopWatch.Elapsed.TotalMilliseconds
   printfn "%A" responseTime
-  printfn "%A" response
-  printfn "%A" body
 
 let newManager () : actor<Manager> =
   actor.Start(fun inbox ->
@@ -107,6 +105,15 @@ let newManager () : actor<Manager> =
     loop Stopped
   )
 
+let getManager managers jobId =
+  let maybeManager = managers |> List.tryFind (fun (jobId', _) -> jobId' = jobId)
+  match maybeManager with
+    | Some (_, manager) -> manager, managers
+    | None ->
+      let manager = newManager()
+      let managers = (jobId, manager) :: managers
+      manager, managers
+
 let newJobManager () : actor<JobManager> =
   actor.Start(fun inbox ->
     let rec loop (managers : (Guid * actor<Manager>) list) =
@@ -115,22 +122,15 @@ let newJobManager () : actor<JobManager> =
         let uri = "http://localhost:8083"
         match msg with
         | Send(jobId, _) ->
-          let maybeManager = managers |> List.tryFind (fun (jobId', _) -> jobId' = jobId)
-          match maybeManager with
-          | Some(_, manager) ->
-            manager.Post(Do(Process uri))
-            return! loop managers
-          | None ->
-            let manager = newManager()
-            manager.Post(Do(Process uri))
-            let managers = (jobId, manager) :: managers
-            return! loop managers
+          let manager, managers = getManager managers jobId
+          manager.Post(Do(Process uri))
+          return! loop managers
         | Stop jobId ->
-          let _, manager = managers |> List.find (fun (jobId', _) -> jobId' = jobId)
+          let manager, managers = getManager managers jobId
           manager.Post(Manager.Stop)
           return! loop managers
         | Start jobId ->
-          let _, manager = managers |> List.find (fun (jobId', _) -> jobId' = jobId)
+          let manager, managers = getManager managers jobId
           manager.Post(Manager.Start)
           return! loop managers
       }
@@ -142,10 +142,10 @@ let jobManager = newJobManager()
 let webPart =
   choose
     [
-      path "/" >>= choose [ GET >>= (OK <| html (System.Guid.NewGuid())) ]
-      path "/send" >>= choose [ POST >>= bindToForm send (fun msg -> jobManager.Post(Send(guid msg.JobId, msg.Message)); OK "Sent") ]
-      path "/stop" >>= choose [ POST >>= bindToForm stop (fun msg -> jobManager.Post(Stop(guid msg.JobId)); OK "Stopped") ]
-      path "/start" >>= choose [ POST >>= bindToForm start (fun msg -> jobManager.Post(Start(guid msg.JobId)); OK "Started") ]
+      path "/" >>= choose [ GET >>= (OK <| html (System.Guid.NewGuid().ToString())) ]
+      path "/send" >>= choose [ POST >>= bindToForm send (fun msg -> jobManager.Post(Send(guid msg.JobId, msg.Message)); (OK <| html msg.JobId)) ]
+      path "/stop" >>= choose [ POST >>= bindToForm stop (fun msg -> jobManager.Post(Stop(guid msg.JobId)); (OK <| html msg.JobId)) ]
+      path "/start" >>= choose [ POST >>= bindToForm start (fun msg -> jobManager.Post(Start(guid msg.JobId)); (OK <| html msg.JobId)) ]
     ]
 
 startWebServer defaultConfig webPart
