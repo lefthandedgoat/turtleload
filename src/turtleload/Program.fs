@@ -9,6 +9,9 @@ open Suave.Model.Binding
 open Suave.Http.ServerErrors
 open HttpFs.Client
 
+//very important
+System.Net.ServicePointManager.DefaultConnectionLimit <- 10000
+
 //helpers
 let guid guid = System.Guid.Parse(guid)
 
@@ -60,12 +63,15 @@ type actor<'t> = MailboxProcessor<'t>
 type Command =
   | Process of string
 
-type Manager =
+type Worker =
   | Do of Command
+
+type Manager =
+  | Do of int * Command
   | Start
   | Stop
 
-type JobManager =
+type MetaManager =
   | Send of jobId : Guid * message : string
   | Stop of jobId : Guid
   | Start of jobId : Guid
@@ -78,24 +84,37 @@ let doit uri =
   let stopWatch = System.Diagnostics.Stopwatch.StartNew()
   let request = createRequest Get <| Uri(uri)
   use response = getResponse request |> Async.RunSynchronously
-  let body = Response.readBodyAsString response |> Async.RunSynchronously
   let responseTime = stopWatch.Elapsed.TotalMilliseconds
   printfn "%A" responseTime
 
+let newWorker manager : actor<Worker> =
+  actor.Start(fun self ->
+    let rec loop manager =
+      async {
+        let! msg = self.Receive ()
+        match msg with
+        | Worker.Do command ->
+          match command with
+          | Process uri -> doit uri
+          return! loop manager
+      }
+    loop manager
+  )
+
 let newManager () : actor<Manager> =
-  actor.Start(fun inbox ->
+  actor.Start(fun self ->
     let rec loop status =
       async {
-        let! msg = inbox.Receive ()
+        let! msg = self.Receive ()
         match msg with
-        | Do command ->
+        | Manager.Do (count, command) ->
           match status with
           | Stopped ->
             printfn "Can't do work when the job is stopped"
             return! loop status
           | Running ->
-            match command with
-            | Process uri -> doit uri
+            let workers = [ 1 .. count ] |> List.map (fun _ -> newWorker self)
+            workers |> List.iter (fun worker -> worker.Post(Worker.Do(command)))
             return! loop status
         | Manager.Stop ->
           return! loop Stopped
@@ -114,16 +133,17 @@ let getManager managers jobId =
       let managers = (jobId, manager) :: managers
       manager, managers
 
-let newJobManager () : actor<JobManager> =
-  actor.Start(fun inbox ->
+let newMetaManager () : actor<MetaManager> =
+  actor.Start(fun self ->
     let rec loop (managers : (Guid * actor<Manager>) list) =
       async {
-        let! msg = inbox.Receive ()
+        let! msg = self.Receive ()
         let uri = "http://localhost:8083"
         match msg with
-        | Send(jobId, _) ->
+        | Send(jobId, count) ->
           let manager, managers = getManager managers jobId
-          manager.Post(Do(Process uri))
+          let count = int count
+          manager.Post(Do(count, Process uri))
           return! loop managers
         | Stop jobId ->
           let manager, managers = getManager managers jobId
@@ -137,15 +157,15 @@ let newJobManager () : actor<JobManager> =
     loop []
   )
 
-let jobManager = newJobManager()
+let metaManager = newMetaManager()
 
 let webPart =
   choose
     [
       path "/" >>= choose [ GET >>= (OK <| html (System.Guid.NewGuid().ToString())) ]
-      path "/send" >>= choose [ POST >>= bindToForm send (fun msg -> jobManager.Post(Send(guid msg.JobId, msg.Message)); (OK <| html msg.JobId)) ]
-      path "/stop" >>= choose [ POST >>= bindToForm stop (fun msg -> jobManager.Post(Stop(guid msg.JobId)); (OK <| html msg.JobId)) ]
-      path "/start" >>= choose [ POST >>= bindToForm start (fun msg -> jobManager.Post(Start(guid msg.JobId)); (OK <| html msg.JobId)) ]
+      path "/send" >>= choose [ POST >>= bindToForm send (fun msg -> metaManager.Post(Send(guid msg.JobId, msg.Message)); (OK <| html msg.JobId)) ]
+      path "/stop" >>= choose [ POST >>= bindToForm stop (fun msg -> metaManager.Post(Stop(guid msg.JobId)); (OK <| html msg.JobId)) ]
+      path "/start" >>= choose [ POST >>= bindToForm start (fun msg -> metaManager.Post(Start(guid msg.JobId)); (OK <| html msg.JobId)) ]
     ]
 
 startWebServer defaultConfig webPart
