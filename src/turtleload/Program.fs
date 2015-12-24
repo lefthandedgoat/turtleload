@@ -65,6 +65,7 @@ type Command =
 
 type Worker =
   | Do of Command
+  | Retire
 
 type Manager =
   | Do of int * Command
@@ -93,6 +94,7 @@ let newWorker manager : actor<Worker> =
       async {
         let! msg = self.Receive ()
         match msg with
+        | Worker.Retire -> return ()
         | Worker.Do command ->
           match command with
           | Process uri -> doit uri
@@ -114,7 +116,7 @@ let newManager () : actor<Manager> =
             return! loop status
           | Running ->
             let workers = [ 1 .. count ] |> List.map (fun _ -> newWorker self)
-            workers |> List.iter (fun worker -> worker.Post(Worker.Do(command)))
+            workers |> List.iter (fun worker -> worker.Post(Worker.Do(command)); worker.Post(Retire))
             return! loop status
         | Manager.Stop ->
           return! loop Stopped
