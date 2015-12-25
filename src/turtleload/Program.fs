@@ -77,7 +77,7 @@ type Worker =
 
 type Manager =
   | Initialize of SendData * Command
-  | WorkerDone
+  | WorkerDone of float
 
 type MetaManager =
   | Send of SendData
@@ -87,7 +87,7 @@ let doit uri =
   let request = createRequest Get <| Uri(uri)
   use response = getResponse request |> Async.RunSynchronously
   let responseTime = stopWatch.Elapsed.TotalMilliseconds
-  sprintf "%A" responseTime
+  responseTime
 
 let newWorker id (manager : actor<Manager>) (command : Command): actor<Worker> =
   actor.Start(fun self ->
@@ -96,12 +96,12 @@ let newWorker id (manager : actor<Manager>) (command : Command): actor<Worker> =
         let! msg = self.Receive ()
         match msg with
         | Worker.Retire ->
-          manager.Post(Manager.WorkerDone)
           return ()
         | Worker.Do ->
           match command with
           | Process uri ->
-            doit uri |> ignore
+            let results = doit uri
+            manager.Post(Manager.WorkerDone results)
           return! loop ()
       }
     loop ())
@@ -120,22 +120,32 @@ let rec haveWorkerWork (workers : actor<Worker> list) maxWorkers activeWorkers =
 
 let newManager () : actor<Manager> =
   actor.Start(fun self ->
-    let rec loop (workers : actor<Worker> list) maxWorkers activeWorkers =
+    let rec loop (workers : actor<Worker> list) maxWorkers activeWorkers results sw =
       async {
         let! msg = self.Receive ()
         match msg with
         | Manager.Initialize (sendData, command) ->
           //build up a list of all the work to do
+          printfn "Requests: %A, Concurrency %A" sendData.NumberOfRequests sendData.MaxWorkers
           let workers = [ 1 .. sendData.NumberOfRequests ] |> List.map (fun id -> newWorker id self command)
           let maxWorkers = sendData.MaxWorkers
           let activeWorkers = 0
+          let results = []
+          let sw = System.Diagnostics.Stopwatch.StartNew()
           let remainingWorkers, activeWorkers = haveWorkerWork workers maxWorkers activeWorkers
-          return! loop remainingWorkers maxWorkers activeWorkers
-        | Manager.WorkerDone ->
+          return! loop remainingWorkers maxWorkers activeWorkers results sw
+        | Manager.WorkerDone ms ->
           let remainingWorkers, activeWorkers = haveWorkerWork workers maxWorkers (activeWorkers - 1)
-          return! loop remainingWorkers maxWorkers activeWorkers
+          let results = ms :: results
+          if activeWorkers = 0 then
+            sw.Stop()
+            let avg = results |> List.average
+            let min = results |> List.min
+            let max = results |> List.max
+            printfn "Total seconds: %A, Average ms: %A, Max ms: %A, Min ms: %A" sw.Elapsed.TotalSeconds avg max min
+          return! loop remainingWorkers maxWorkers activeWorkers results sw
       }
-    loop [] 0 0)
+    loop [] 0 0 [] null)
 
 let getManager managers jobId =
   let maybeManager = managers |> List.tryFind (fun (jobId', _) -> jobId' = jobId)
@@ -151,7 +161,7 @@ let newMetaManager () : actor<MetaManager> =
     let rec loop (managers : (Guid * actor<Manager>) list) =
       async {
         let! msg = self.Receive ()
-        let uri = "http://localhost:3000/"
+        let uri = "http://localhost/"
         match msg with
         | Send sendData ->
           let manager, managers = getManager managers sendData.JobId
@@ -165,8 +175,8 @@ let metaManager = newMetaManager()
 let webPart =
   choose
     [
-      path "/" >>= choose [ GET >>= (OK <| html (System.Guid.NewGuid().ToString())) ]
       path "/test" >>= choose [ GET >>= OK "this is a test" ]
+      path "/" >>= choose [ GET >>= warbler (fun _ -> OK <| html (System.Guid.NewGuid().ToString())) ]
       path "/send" >>= choose [ POST >>= bindToForm send
                                            (fun sendFormData ->
                                               metaManager.Post(Send(convertSendData sendFormData))
