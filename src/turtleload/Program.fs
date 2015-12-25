@@ -77,7 +77,6 @@ type Worker =
 
 type Manager =
   | Initialize of SendData * Command
-  | Do
   | WorkerDone
 
 type MetaManager =
@@ -102,50 +101,41 @@ let newWorker id (manager : actor<Manager>) (command : Command): actor<Worker> =
         | Worker.Do ->
           match command with
           | Process uri ->
-            let results = doit uri
-            ()
-            //printfn "%i, %s" id results
+            doit uri |> ignore
           return! loop ()
       }
-    loop ()
-  )
+    loop ())
+
+let rec haveWorkerWork (workers : actor<Worker> list) maxWorkers activeWorkers =
+  if activeWorkers < maxWorkers then
+    match workers with
+    | worker :: remainingWorkers ->
+      worker.Post(Worker.Do)
+      worker.Post(Retire)
+      //recurse in case there arent enough working workers
+      haveWorkerWork remainingWorkers maxWorkers (activeWorkers + 1)
+    | [] -> [], activeWorkers
+  else //nothing changes until a worker frees up
+    workers, activeWorkers
 
 let newManager () : actor<Manager> =
   actor.Start(fun self ->
-    let rec loop (workers : actor<Worker> list) maxWorkers activeWorkers chills =
+    let rec loop (workers : actor<Worker> list) maxWorkers activeWorkers =
       async {
         let! msg = self.Receive ()
         match msg with
         | Manager.Initialize (sendData, command) ->
           //build up a list of all the work to do
           let workers = [ 1 .. sendData.NumberOfRequests ] |> List.map (fun id -> newWorker id self command)
-          self.Post(Do)
+          let maxWorkers = sendData.MaxWorkers
           let activeWorkers = 0
-          return! loop workers sendData.MaxWorkers activeWorkers chills
-        | Manager.Do ->
-          if activeWorkers < maxWorkers then
-            match workers with
-            |  worker :: remainingWorkers ->
-               worker.Post(Worker.Do)
-               worker.Post(Retire)
-               self.Post(Do)
-               let chills = 0
-               return! loop remainingWorkers maxWorkers (activeWorkers + 1) chills
-            | [] -> printfn "out of workers"; return! loop [] maxWorkers activeWorkers chills
-          else //basically saying that we are at our worker threshold, so put message on que and loop til a worker frees up
-            if chills >= 50 then //if we queue up a bunch of DOs in a row then we need to chill and let some workers finish
-              printfn "CHILLIN %A" self.CurrentQueueLength
-              do! Async.Sleep(1)
-              self.Post(Do)
-              let chills = 0
-              return! loop workers maxWorkers activeWorkers chills
-            else
-              self.Post(Do)
-              return! loop workers maxWorkers activeWorkers (chills + 1)
-        | Manager.WorkerDone -> return! loop workers maxWorkers (activeWorkers - 1) chills
+          let remainingWorkers, activeWorkers = haveWorkerWork workers maxWorkers activeWorkers
+          return! loop remainingWorkers maxWorkers activeWorkers
+        | Manager.WorkerDone ->
+          let remainingWorkers, activeWorkers = haveWorkerWork workers maxWorkers (activeWorkers - 1)
+          return! loop remainingWorkers maxWorkers activeWorkers
       }
-    loop [] 0 0 0
-  )
+    loop [] 0 0)
 
 let getManager managers jobId =
   let maybeManager = managers |> List.tryFind (fun (jobId', _) -> jobId' = jobId)
@@ -168,8 +158,7 @@ let newMetaManager () : actor<MetaManager> =
           manager.Post(Initialize(sendData, Process uri))
           return! loop managers
       }
-    loop []
-  )
+    loop [])
 
 let metaManager = newMetaManager()
 
