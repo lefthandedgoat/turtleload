@@ -23,9 +23,28 @@ let logAndShow500 error =
 let bindToForm form handler =
   bindReq (bindForm form) handler logAndShow500
 
-type Send = { JobId : string; NumberOfRequests : string; }
+type SendFormData =
+  {
+    JobId : string
+    NumberOfRequests : string
+    MaxWorkers : string
+  }
 
-let send : Form<Send> = Form ([],[])
+type SendData =
+  {
+    JobId : System.Guid
+    NumberOfRequests : int
+    MaxWorkers : int
+  }
+
+let convertSendData (sendFormData : SendFormData) =
+  {
+    JobId = guid sendFormData.JobId
+    NumberOfRequests = int sendFormData.NumberOfRequests
+    MaxWorkers = int sendFormData.MaxWorkers
+  }
+
+let send : Form<SendFormData> = Form ([],[])
 
 let html jobId =
  sprintf """
@@ -35,6 +54,9 @@ let html jobId =
 <form method="POST" action="/send">
   Number of requests:
   <input type="text" name="NumberOfRequests">
+  <br/>
+  Max number of concurrent requests:
+  <input type="text" name="MaxWorkers">
   <input type="hidden" name="JobId" value="%s">
   <input type="submit" value="Send">
 </form>
@@ -50,49 +72,79 @@ type Command =
   | Process of string
 
 type Worker =
-  | Do of Command
+  | Do
   | Retire
 
 type Manager =
-  | Do of int * Command
+  | Initialize of SendData * Command
+  | Do
+  | WorkerDone
 
 type MetaManager =
-  | Send of jobId : Guid * numberOfRequests : int
+  | Send of SendData
 
 let doit uri =
   let stopWatch = System.Diagnostics.Stopwatch.StartNew()
   let request = createRequest Get <| Uri(uri)
   use response = getResponse request |> Async.RunSynchronously
   let responseTime = stopWatch.Elapsed.TotalMilliseconds
-  printfn "%A" responseTime
+  sprintf "%A" responseTime
 
-let newWorker manager : actor<Worker> =
-  actor.Start(fun self ->
-    let rec loop manager =
-      async {
-        let! msg = self.Receive ()
-        match msg with
-        | Worker.Retire -> return ()
-        | Worker.Do command ->
-          match command with
-          | Process uri -> doit uri
-          return! loop manager
-      }
-    loop manager
-  )
-
-let newManager () : actor<Manager> =
+let newWorker id (manager : actor<Manager>) (command : Command): actor<Worker> =
   actor.Start(fun self ->
     let rec loop () =
       async {
         let! msg = self.Receive ()
         match msg with
-        | Manager.Do (count, command) ->
-          let workers = [ 1 .. count ] |> List.map (fun _ -> newWorker self)
-          workers |> List.iter (fun worker -> worker.Post(Worker.Do(command)); worker.Post(Retire))
+        | Worker.Retire ->
+          manager.Post(Manager.WorkerDone)
+          return ()
+        | Worker.Do ->
+          match command with
+          | Process uri ->
+            let results = doit uri
+            ()
+            //printfn "%i, %s" id results
           return! loop ()
       }
     loop ()
+  )
+
+let newManager () : actor<Manager> =
+  actor.Start(fun self ->
+    let rec loop (workers : actor<Worker> list) maxWorkers activeWorkers chills =
+      async {
+        let! msg = self.Receive ()
+        match msg with
+        | Manager.Initialize (sendData, command) ->
+          //build up a list of all the work to do
+          let workers = [ 1 .. sendData.NumberOfRequests ] |> List.map (fun id -> newWorker id self command)
+          self.Post(Do)
+          let activeWorkers = 0
+          return! loop workers sendData.MaxWorkers activeWorkers chills
+        | Manager.Do ->
+          if activeWorkers < maxWorkers then
+            match workers with
+            |  worker :: remainingWorkers ->
+               worker.Post(Worker.Do)
+               worker.Post(Retire)
+               self.Post(Do)
+               let chills = 0
+               return! loop remainingWorkers maxWorkers (activeWorkers + 1) chills
+            | [] -> printfn "out of workers"; return! loop [] maxWorkers activeWorkers chills
+          else //basically saying that we are at our worker threshold, so put message on que and loop til a worker frees up
+            if chills >= 50 then //if we queue up a bunch of DOs in a row then we need to chill and let some workers finish
+              printfn "CHILLIN %A" self.CurrentQueueLength
+              do! Async.Sleep(1)
+              self.Post(Do)
+              let chills = 0
+              return! loop workers maxWorkers activeWorkers chills
+            else
+              self.Post(Do)
+              return! loop workers maxWorkers activeWorkers (chills + 1)
+        | Manager.WorkerDone -> return! loop workers maxWorkers (activeWorkers - 1) chills
+      }
+    loop [] 0 0 0
   )
 
 let getManager managers jobId =
@@ -109,11 +161,11 @@ let newMetaManager () : actor<MetaManager> =
     let rec loop (managers : (Guid * actor<Manager>) list) =
       async {
         let! msg = self.Receive ()
-        let uri = "http://localhost:8083"
+        let uri = "http://localhost:3000/"
         match msg with
-        | Send(jobId, count) ->
-          let manager, managers = getManager managers jobId
-          manager.Post(Do(count, Process uri))
+        | Send sendData ->
+          let manager, managers = getManager managers sendData.JobId
+          manager.Post(Initialize(sendData, Process uri))
           return! loop managers
       }
     loop []
@@ -125,10 +177,11 @@ let webPart =
   choose
     [
       path "/" >>= choose [ GET >>= (OK <| html (System.Guid.NewGuid().ToString())) ]
+      path "/test" >>= choose [ GET >>= OK "this is a test" ]
       path "/send" >>= choose [ POST >>= bindToForm send
-                                           (fun msg ->
-                                              metaManager.Post(Send(guid msg.JobId, int msg.NumberOfRequests))
-                                              OK <| html msg.JobId) ]
+                                           (fun sendFormData ->
+                                              metaManager.Post(Send(convertSendData sendFormData))
+                                              OK <| html sendFormData.JobId) ]
     ]
 
 startWebServer defaultConfig webPart
