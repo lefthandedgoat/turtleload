@@ -77,7 +77,7 @@ type Worker =
 
 type Manager =
   | Initialize of SendData * Command
-  | WorkerDone of float
+  | WorkerDone of float * actor<Worker>
 
 type MetaManager =
   | Send of SendData
@@ -89,7 +89,7 @@ let doit uri =
   let responseTime = stopWatch.Elapsed.TotalMilliseconds
   responseTime
 
-let newWorker id (manager : actor<Manager>) (command : Command): actor<Worker> =
+let newWorker (manager : actor<Manager>) (command : Command): actor<Worker> =
   actor.Start(fun self ->
     let rec loop () =
       async {
@@ -101,51 +101,52 @@ let newWorker id (manager : actor<Manager>) (command : Command): actor<Worker> =
           match command with
           | Process uri ->
             let results = doit uri
-            manager.Post(Manager.WorkerDone results)
+            manager.Post(Manager.WorkerDone(results, self))
           return! loop ()
       }
     loop ())
 
-let rec haveWorkerWork (workers : actor<Worker> list) maxWorkers activeWorkers =
-  if activeWorkers < maxWorkers then
-    match workers with
+let rec haveWorkersWork (idleWorkers : actor<Worker> list) numberOfRequests =
+    match idleWorkers with
+    | [] -> numberOfRequests
     | worker :: remainingWorkers ->
       worker.Post(Worker.Do)
-      worker.Post(Retire)
-      //recurse in case there arent enough working workers
-      haveWorkerWork remainingWorkers maxWorkers (activeWorkers + 1)
-    | [] -> [], activeWorkers
-  else //nothing changes until a worker frees up
-    workers, activeWorkers
+      haveWorkersWork remainingWorkers (numberOfRequests - 1)
 
 let newManager () : actor<Manager> =
+  let sw = System.Diagnostics.Stopwatch()
   actor.Start(fun self ->
-    let rec loop (workers : actor<Worker> list) maxWorkers activeWorkers results sw =
+    let rec loop numberOfRequests pendingRequests results =
       async {
         let! msg = self.Receive ()
         match msg with
         | Manager.Initialize (sendData, command) ->
           //build up a list of all the work to do
           printfn "Requests: %A, Concurrency %A" sendData.NumberOfRequests sendData.MaxWorkers
-          let workers = [ 1 .. sendData.NumberOfRequests ] |> List.map (fun id -> newWorker id self command)
-          let maxWorkers = sendData.MaxWorkers
-          let activeWorkers = 0
+          let numberOfRequests = sendData.NumberOfRequests
+          let workers = [ 1 .. sendData.MaxWorkers ] |> List.map (fun _ -> newWorker self command)
           let results = []
-          let sw = System.Diagnostics.Stopwatch.StartNew()
-          let remainingWorkers, activeWorkers = haveWorkerWork workers maxWorkers activeWorkers
-          return! loop remainingWorkers maxWorkers activeWorkers results sw
-        | Manager.WorkerDone ms ->
-          let remainingWorkers, activeWorkers = haveWorkerWork workers maxWorkers (activeWorkers - 1)
+          let pendingRequests = sendData.MaxWorkers
+          sw.Restart()
+          let numberOfRequests = haveWorkersWork workers numberOfRequests
+          return! loop numberOfRequests pendingRequests results
+        | Manager.WorkerDone(ms, worker) ->
           let results = ms :: results
-          if activeWorkers = 0 then
+          if numberOfRequests > 0 then
+            let numberOfRequests = haveWorkersWork [worker] numberOfRequests
+            return! loop numberOfRequests pendingRequests results
+          else if pendingRequests > 1 then //if only 1 pendingRequest, then this that pendingRequest so we are done
+            let pendingRequests = pendingRequests - 1
+            return! loop numberOfRequests pendingRequests results
+          else
             sw.Stop()
             let avg = results |> List.average
             let min = results |> List.min
             let max = results |> List.max
             printfn "Total seconds: %A, Average ms: %A, Max ms: %A, Min ms: %A" sw.Elapsed.TotalSeconds avg max min
-          return! loop remainingWorkers maxWorkers activeWorkers results sw
+            return! loop numberOfRequests pendingRequests results
       }
-    loop [] 0 0 [] null)
+    loop 0 0 [])
 
 let getManager managers jobId =
   let maybeManager = managers |> List.tryFind (fun (jobId', _) -> jobId' = jobId)
