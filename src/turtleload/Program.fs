@@ -4,6 +4,7 @@ open Suave.Form
 open Suave.Http.Successful
 open Suave.Web
 open Suave.Http
+open Suave.Types
 open Suave.Http.Applicatives
 open Suave.Model.Binding
 open Suave.Http.ServerErrors
@@ -28,6 +29,7 @@ type SendFormData =
     JobId : string
     NumberOfRequests : string
     MaxWorkers : string
+    Uri : string
   }
 
 type SendData =
@@ -35,6 +37,7 @@ type SendData =
     JobId : System.Guid
     NumberOfRequests : int
     MaxWorkers : int
+    Uri : string
   }
 
 let convertSendData (sendFormData : SendFormData) =
@@ -42,28 +45,27 @@ let convertSendData (sendFormData : SendFormData) =
     JobId = guid sendFormData.JobId
     NumberOfRequests = int sendFormData.NumberOfRequests
     MaxWorkers = int sendFormData.MaxWorkers
+    Uri = sendFormData.Uri
   }
 
 let send : Form<SendFormData> = Form ([],[])
 
-let html jobId =
+let html uri requests workers jobId =
  sprintf """
 <html>
 <body>
 
 <form method="POST" action="/send">
-  Number of requests:
-  <input type="text" name="NumberOfRequests">
-  <br/>
-  Max number of concurrent requests:
-  <input type="text" name="MaxWorkers">
-  <input type="hidden" name="JobId" value="%s">
+  Max number of concurrent requests:<input type="text" name="Uri" value="%s"><br/>
+  Number of requests:<input type="text" name="NumberOfRequests" value="%i"><br/>
+  Max number of concurrent requests:<input type="text" name="MaxWorkers" value="%i"><br/>
+  <input type="hidden" name="JobId" value="%A">
   <input type="submit" value="Send">
 </form>
 
 </body>
 </html>
-  """ jobId
+  """ uri requests workers jobId
 
 //actor stuff
 type actor<'t> = MailboxProcessor<'t>
@@ -162,11 +164,10 @@ let newMetaManager () : actor<MetaManager> =
     let rec loop (managers : (Guid * actor<Manager>) list) =
       async {
         let! msg = self.Receive ()
-        let uri = "http://localhost/"
         match msg with
         | Send sendData ->
           let manager, managers = getManager managers sendData.JobId
-          manager.Post(Initialize(sendData, Process uri))
+          manager.Post(Initialize(sendData, Process sendData.Uri))
           return! loop managers
       }
     loop [])
@@ -177,11 +178,13 @@ let webPart =
   choose
     [
       path "/test" >>= choose [ GET >>= OK "this is a test" ]
-      path "/" >>= choose [ GET >>= warbler (fun _ -> OK <| html (System.Guid.NewGuid().ToString())) ]
+      path "/" >>= choose [ GET >>= warbler (fun _ -> OK <| html "http://localhost/" 10 1 (System.Guid.NewGuid())) ]
       path "/send" >>= choose [ POST >>= bindToForm send
                                            (fun sendFormData ->
-                                              metaManager.Post(Send(convertSendData sendFormData))
-                                              OK <| html sendFormData.JobId) ]
+                                              let sendData = convertSendData sendFormData
+                                              metaManager.Post(Send sendData)
+                                              OK <| html sendFormData.Uri sendData.NumberOfRequests sendData.MaxWorkers sendData.JobId) ]
     ]
 
-startWebServer defaultConfig webPart
+let config = { defaultConfig with bindings = [ HttpBinding.mk' HTTP "127.0.0.1" 8085 ] }
+startWebServer config webPart
