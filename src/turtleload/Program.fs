@@ -9,12 +9,19 @@ open Suave.Http.Applicatives
 open Suave.Model.Binding
 open Suave.Http.ServerErrors
 open HttpFs.Client
+open Microsoft.FSharp.Reflection
 
 //very important
 System.Net.ServicePointManager.DefaultConnectionLimit <- 10000
 
 //helpers
 let guid guid = System.Guid.Parse(guid)
+
+let requestHeaders =
+  FSharpType.GetUnionCases(typeof<HttpFs.Client.RequestHeader>)
+  |> Array.map (fun requestHeader -> (string requestHeader).Replace("RequestHeader.",""))
+  |> Array.map (fun requestHeader -> sprintf """<option value="%s">%s</option>""" requestHeader requestHeader)
+  |> String.Concat
 
 //web stuff
 let logAndShow500 error =
@@ -56,16 +63,17 @@ let html uri requests workers jobId =
 <body>
 
 <form method="POST" action="/send">
-  Max number of concurrent requests:<input type="text" name="Uri" value="%s"><br/>
+  URI:<input type="text" name="Uri" value="%s"><br/>
   Number of requests:<input type="text" name="NumberOfRequests" value="%i"><br/>
   Max number of concurrent requests:<input type="text" name="MaxWorkers" value="%i"><br/>
+  Request Header: <select>%s</select> <br/>
   <input type="hidden" name="JobId" value="%A">
   <input type="submit" value="Send">
 </form>
 
 </body>
 </html>
-  """ uri requests workers jobId
+  """ uri requests workers requestHeaders jobId
 
 //actor stuff
 type actor<'t> = MailboxProcessor<'t>
@@ -178,7 +186,7 @@ let webPart =
   choose
     [
       path "/test" >>= choose [ GET >>= OK "this is a test" ]
-      path "/" >>= choose [ GET >>= warbler (fun _ -> OK <| html "http://localhost/" 10 1 (System.Guid.NewGuid())) ]
+      path "/" >>= choose [ GET >>= warbler (fun _ -> OK <| html "http://localhost:8085/test" 10 1 (System.Guid.NewGuid())) ]
       path "/send" >>= choose [ POST >>= bindToForm send
                                            (fun sendFormData ->
                                               let sendData = convertSendData sendFormData
